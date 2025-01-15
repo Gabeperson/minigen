@@ -1,0 +1,14 @@
+[package]
+name = "minigen"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+futures-core = { version = "0.3.31", optional = true }
+# reqwest = "0.12.12"
+# tokio = { version = "1.43.0", features = ["rt-multi-thread", "macros"] }
+
+
+[features]
+stream = ["dep:futures-core"]
+
