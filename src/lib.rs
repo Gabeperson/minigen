@@ -9,35 +9,6 @@ use std::{
     task::{Context, Poll, Wake, Waker},
 };
 
-// fn main() {
-//     let mut generator = generator(|mut yielder| async move {
-//         for i in 0..5 {
-//             yielder.yield_value(i);
-//         }
-//     });
-// }
-
-// fn main() {
-//     let mut vec = vec!["1", "2"];
-//     let mut g = generator(async |mut yielder| {
-//         for s in &mut vec {
-//             *s = "3";
-//             yielder.yield_value(s).await;
-//         }
-//         5.
-//     });
-//     loop {
-//         match g.next() {
-//             GeneratorStatus::Completed => break,
-//             other => {
-//                 dbg!(other);
-//             }
-//         }
-//     }
-//     drop(g);
-//     dbg!(vec);
-// }
-
 pub struct Yielder<Y> {
     sender: Sender<Y>,
 }
@@ -91,7 +62,6 @@ pub struct MiniIter<'a, Y>(MiniGen<'a, Y, ()>);
 
 impl<Y> Iterator for MiniIter<'_, Y> {
     type Item = Y;
-
     fn next(&mut self) -> Option<Self::Item> {
         match self.0.resume() {
             GeneratorStatus::Yielded(it) => Some(it),
@@ -101,7 +71,7 @@ impl<Y> Iterator for MiniIter<'_, Y> {
 }
 
 impl<Y> MiniIter<'_, Y> {
-    pub fn next_async(&mut self) -> impl Future<Output = Option<Y>> {
+    pub fn resume(&mut self) -> impl Future<Output = Option<Y>> {
         MiniIterFuture {
             generator: &mut *self,
         }
@@ -147,7 +117,7 @@ impl<Y> futures_core::Stream for MiniIter<'_, Y> {
     type Item = Y;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let fut = self.next_async();
+        let fut = self.resume();
         let fut = std::pin::pin!(fut);
         fut.poll(cx)
     }
@@ -160,7 +130,7 @@ pub enum GeneratorStatus<Y, R> {
     Completed,
 }
 
-impl<'a, Y, R> MiniGen<'a, Y, R> {
+impl<Y, R> MiniGen<'_, Y, R> {
     pub fn resume(&mut self) -> GeneratorStatus<Y, R> {
         // The future was polled to completion before, so we should act similar to a
         // fused iterator and return that it's completed
@@ -191,14 +161,14 @@ impl<'a, Y, R> MiniGen<'a, Y, R> {
         }
     }
 
-    pub fn resume_async<'r>(&'r mut self) -> MiniGenFuture<'r, 'a, Y, R> {
+    pub fn resume_async(&mut self) -> impl Future<Output = GeneratorStatus<Y, R>> {
         MiniGenFuture {
             generator: &mut *self,
         }
     }
 }
 
-pub struct MiniGenFuture<'r, 'g, Y, R> {
+struct MiniGenFuture<'r, 'g, Y, R> {
     generator: &'r mut MiniGen<'g, Y, R>,
 }
 
