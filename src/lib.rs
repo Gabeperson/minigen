@@ -2,10 +2,7 @@
 use std::{
     future::Future,
     pin::Pin,
-    sync::{
-        Arc, LazyLock,
-        mpsc::{Receiver, Sender, channel},
-    },
+    sync::{Arc, LazyLock, Mutex},
     task::{Context, Poll, Wake, Waker},
 };
 
@@ -13,17 +10,38 @@ pub struct Yielder<Y> {
     sender: Sender<Y>,
 }
 
+struct Sender<T>(Arc<Mutex<Option<T>>>);
+
+struct Receiver<T>(Arc<Mutex<Option<T>>>);
+
+impl<T> Sender<T> {
+    fn send(&mut self, val: T) {
+        let mut lock = self.0.try_lock().expect("Caller should be waiting");
+        *lock = Some(val);
+    }
+}
+
+impl<T> Receiver<T> {
+    /// Take the value out of the inner mutex and panic if there is none
+    fn try_recv(&mut self) -> Option<T> {
+        let mut lock = self.0.try_lock().expect(
+            "Generator should have yielded. (Can happen if called in a task or another thread)",
+        );
+        lock.take()
+    }
+}
+
 impl<Y> Yielder<Y> {
     pub fn yield_value(&mut self, value: Y) -> impl Future<Output = ()> {
         YieldFuture {
-            sender: &self.sender,
+            sender: &mut self.sender,
             value: Some(value),
         }
     }
 }
 
 struct YieldFuture<'a, Y> {
-    sender: &'a Sender<Y>,
+    sender: &'a mut Sender<Y>,
     value: Option<Y>,
 }
 
@@ -37,10 +55,12 @@ impl<Y> Future for YieldFuture<'_, Y> {
         _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         match self.value.take() {
+            // First time being polled, yield so the caller (of the generator) regains control
             Some(v) => {
-                self.sender.send(v).unwrap();
+                self.sender.send(v);
                 Poll::Pending
             }
+            // Second time being polled
             None => Poll::Ready(()),
         }
     }
@@ -103,7 +123,7 @@ impl<Y> Future for MiniIterFuture<'_, '_, Y> {
             Poll::Pending => {
                 // We check here, because the future might yield for some reason other than
                 // stream.yield_value()
-                if let Ok(v) = self.generator.0.receiver.try_recv() {
+                if let Some(v) = self.generator.0.receiver.try_recv() {
                     return Poll::Ready(Some(v));
                 }
                 Poll::Pending
@@ -153,7 +173,7 @@ impl<Y, R> MiniGen<'_, Y, R> {
                 Poll::Pending => {
                     // We check here, because the future might yield for some reason other than
                     // stream.yield_value()
-                    if let Ok(v) = self.receiver.try_recv() {
+                    if let Some(v) = self.receiver.try_recv() {
                         return GeneratorStatus::Yielded(v);
                     }
                 }
@@ -193,7 +213,7 @@ impl<Y, R> Future for MiniGenFuture<'_, '_, Y, R> {
             Poll::Pending => {
                 // We check here, because the future might yield for some reason other than
                 // stream.yield_value()
-                if let Ok(v) = self.generator.receiver.try_recv() {
+                if let Some(v) = self.generator.receiver.try_recv() {
                     return Poll::Ready(GeneratorStatus::Yielded(v));
                 }
                 Poll::Pending
@@ -205,7 +225,8 @@ impl<Y, R> Future for MiniGenFuture<'_, '_, Y, R> {
 pub fn generator<'a, Y, R, Fut: Future<Output = R> + 'a, F: FnOnce(Yielder<Y>) -> Fut>(
     func: F,
 ) -> MiniGen<'a, Y, R> {
-    let (sender, receiver) = channel();
+    let arc = Arc::new(Mutex::new(None));
+    let (sender, receiver) = (Sender(arc.clone()), Receiver(arc.clone()));
     let stream = Yielder::<Y> { sender };
 
     let future = func(stream);
