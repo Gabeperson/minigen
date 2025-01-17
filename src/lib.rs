@@ -13,7 +13,7 @@ mod yielder {
     }
 
     impl<Y> Yielder<Y> {
-        pub fn yield_value(&mut self, value: Y) -> YieldFuture<'_, Y> {
+        pub fn yield_value(&mut self, value: Y) -> impl Future<Output = ()> {
             YieldFuture {
                 sender: &mut self.sender,
                 value: Some(value),
@@ -67,8 +67,7 @@ mod yielder {
         }
     }
 
-    #[must_use = "YieldFuture must be awaited to yield a value!"]
-    pub struct YieldFuture<'a, Y> {
+    struct YieldFuture<'a, Y> {
         sender: &'a mut Sender<Y>,
         value: Option<Y>,
     }
@@ -155,15 +154,14 @@ mod generator {
                 }
             }
 
-            pub fn resume_async(&mut self) -> MiniGenFuture<'_, Y, R, Fut> {
+            pub fn resume_async(&mut self) -> impl Future<Output = GeneratorStatus<Y, R>> {
                 MiniGenFuture {
                     generator: &mut *self,
                 }
             }
         }
 
-        #[must_use = "Must be awaited to produce a value!"]
-        pub struct MiniGenFuture<'r, Y, R, Fut: Future<Output = R>> {
+        struct MiniGenFuture<'r, Y, R, Fut: Future<Output = R>> {
             generator: &'r mut MiniGen<Y, R, Fut>,
         }
 
@@ -212,14 +210,13 @@ mod generator {
 
     impl<Y, Fut: Future<Output = ()>> Unpin for MiniIter<Y, Fut> {}
 
-    #[must_use = "Must be awaited to produce a value!"]
     #[repr(transparent)]
-    pub struct MiniIterFuture<'r, Y, Fut: Future<Output = ()>> {
+    struct MiniIterFuture<'r, Y, Fut: Future<Output = ()>> {
         generator: &'r mut MiniIter<Y, Fut>,
     }
 
     impl<Y, Fut: Future<Output = ()>> MiniIter<Y, Fut> {
-        pub fn resume_async(&mut self) -> MiniIterFuture<'_, Y, Fut> {
+        pub fn resume_async(&mut self) -> impl Future<Output = Option<Y>> {
             MiniIterFuture {
                 generator: &mut *self,
             }
