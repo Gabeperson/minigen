@@ -1,26 +1,34 @@
 use minigen::*;
-#[tokio::main]
-async fn main() {
-    tokio::task::spawn(func());
-    std::thread::sleep(std::time::Duration::from_secs(10000));
-}
+// #[tokio::main]
+// async fn main() {
+//     tokio::task::spawn(func());
+//     std::thread::sleep(std::time::Duration::from_secs(10000));
+// }
+
+fn main() {}
 
 async fn func() {
-    let mut generator = generator(|mut yielder| async move {
+    let mut generator1 = generator(|mut yielder| async move {
         for i in 0..100 {
             yielder.yield_value(i).await;
         }
     });
-    loop {
-        match generator.resume_async().await {
-            GeneratorStatus::Yielded(v) => println!("Yielded: {v:?}"),
-            GeneratorStatus::Returned(v2) => println!("Returned: {v2:?}"),
-            GeneratorStatus::Completed => {
-                println!("completed");
-                break;
-            }
+    let mut generator2 = generator(|mut yielder| async move {
+        for i in 0..100 {
+            yielder.yield_value(i).await;
         }
-    }
+    });
+    let mut gens = [generator1, generator2];
+    // loop {
+    //     match generator.resume_async().await {
+    //         GeneratorStatus::Yielded(v) => println!("Yielded: {v:?}"),
+    //         GeneratorStatus::Returned(v2) => println!("Returned: {v2:?}"),
+    //         GeneratorStatus::Completed => {
+    //             println!("completed");
+    //             break;
+    //         }
+    //     }
+    // }
 }
 // use minigen::*;
 // fn main() {

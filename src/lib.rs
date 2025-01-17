@@ -1,16 +1,15 @@
 #![forbid(unsafe_code)]
-use std::rc::Rc;
-use std::{cell::Cell, future::Future};
+use std::future::Future;
 
 mod yielder {
-    use std::{cell::Cell, rc::Rc, task::Poll};
+    use std::task::Poll;
 
     pub struct Yielder<Y> {
         pub(crate) sender: Sender<Y>,
     }
 
     impl<Y> Yielder<Y> {
-        pub fn yield_value(&mut self, value: Y) -> impl Future<Output = ()> {
+        pub fn yield_value(&mut self, value: Y) -> YieldFuture<'_, Y> {
             YieldFuture {
                 sender: &mut self.sender,
                 value: Some(value),
@@ -18,10 +17,14 @@ mod yielder {
         }
     }
 
-    // #[cfg(not(feature = "send"))]
+    #[cfg(not(feature = "send"))]
     #[repr(transparent)]
-    pub(crate) struct Sender<T>(pub(crate) Rc<Cell<Option<T>>>);
+    pub(crate) struct Sender<T>(pub(crate) std::rc::Rc<std::cell::Cell<Option<T>>>);
 
+    #[cfg(feature = "send")]
+    pub(crate) struct Sender<T>(pub(crate) std::sync::Arc<std::sync::Mutex<Option<T>>>);
+
+    #[cfg(not(feature = "send"))]
     impl<T> Sender<T> {
         pub(crate) fn send(&mut self, val: T) {
             let old = self.0.replace(Some(val));
@@ -29,16 +32,38 @@ mod yielder {
         }
     }
 
-    #[repr(transparent)]
-    pub(crate) struct Receiver<T>(pub(crate) Rc<Cell<Option<T>>>);
+    #[cfg(feature = "send")]
+    impl<T> Sender<T> {
+        pub(crate) fn send(&mut self, val: T) {
+            let mut lock = self.0.try_lock().expect("Calling thread should be waiting");
+            let old = lock.replace(val);
+            assert!(old.is_none(), "sending, but channel isn't empty!");
+        }
+    }
 
+    #[cfg(not(feature = "send"))]
+    #[repr(transparent)]
+    pub(crate) struct Receiver<T>(pub(crate) std::rc::Rc<std::cell::Cell<Option<T>>>);
+
+    #[cfg(feature = "send")]
+    #[repr(transparent)]
+    pub(crate) struct Receiver<T>(pub(crate) std::sync::Arc<std::sync::Mutex<Option<T>>>);
+
+    #[cfg(not(feature = "send"))]
     impl<T> Receiver<T> {
         pub(crate) fn try_recv(&mut self) -> Option<T> {
             self.0.take()
         }
     }
+    #[cfg(feature = "send")]
+    impl<T> Receiver<T> {
+        pub(crate) fn try_recv(&mut self) -> Option<T> {
+            let mut lock = self.0.try_lock().expect("Calling thread should be waiting");
+            lock.take()
+        }
+    }
 
-    struct YieldFuture<'a, Y> {
+    pub struct YieldFuture<'a, Y> {
         sender: &'a mut Sender<Y>,
         value: Option<Y>,
     }
@@ -72,14 +97,12 @@ mod generator {
         task::{Context, Poll, Wake},
     };
 
-    use crate::yielder::*;
-
     struct NoopWake;
     impl Wake for NoopWake {
         fn wake(self: Arc<Self>) {}
     }
 
-    pub(crate) use backend::MiniGen;
+    pub use backend::MiniGen;
     mod backend {
         use std::{
             pin::Pin,
@@ -87,17 +110,16 @@ mod generator {
             task::{Context, Poll, Waker},
         };
 
-        use crate::generator::NoopWake;
+        use crate::{Receiver, generator::NoopWake};
 
-        use super::{GeneratorStatus, Receiver};
+        use super::GeneratorStatus;
 
-        pub struct MiniGen<'a, Y, R> {
-            pub(crate) future: Pin<Box<dyn Future<Output = R> + 'a>>,
+        pub struct MiniGen<Y, R, Fut: Future<Output = R>> {
+            pub(crate) future: Pin<Box<Fut>>,
             pub(crate) receiver: Receiver<Y>,
             pub(crate) finished: bool,
         }
-
-        impl<Y, R> MiniGen<'_, Y, R> {
+        impl<Y, R, Fut: Future<Output = R>> MiniGen<Y, R, Fut> {
             pub fn resume(&mut self) -> GeneratorStatus<Y, R> {
                 // The future was polled to completion before, so we should act similar to a
                 // fused iterator and return that it's completed
@@ -128,18 +150,18 @@ mod generator {
                 }
             }
 
-            pub fn resume_async(&mut self) -> impl Future<Output = GeneratorStatus<Y, R>> {
+            pub fn resume_async(&mut self) -> MiniGenFuture<'_, Y, R, Fut> {
                 MiniGenFuture {
                     generator: &mut *self,
                 }
             }
         }
 
-        struct MiniGenFuture<'r, 'g, Y, R> {
-            generator: &'r mut MiniGen<'g, Y, R>,
+        pub struct MiniGenFuture<'r, Y, R, Fut: Future<Output = R>> {
+            generator: &'r mut MiniGen<Y, R, Fut>,
         }
 
-        impl<Y, R> Future for MiniGenFuture<'_, '_, Y, R> {
+        impl<Y, R, Fut: Future<Output = R>> Future for MiniGenFuture<'_, Y, R, Fut> {
             type Output = GeneratorStatus<Y, R>;
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -170,9 +192,9 @@ mod generator {
         }
     }
 
-    pub struct MiniIter<'a, Y>(pub(crate) MiniGen<'a, Y, ()>);
+    pub struct MiniIter<Y, Fut: Future<Output = ()>>(pub(crate) MiniGen<Y, (), Fut>);
 
-    impl<Y> Iterator for MiniIter<'_, Y> {
+    impl<Y, Fut: Future<Output = ()>> Iterator for MiniIter<Y, Fut> {
         type Item = Y;
         fn next(&mut self) -> Option<Self::Item> {
             match self.0.resume() {
@@ -182,22 +204,22 @@ mod generator {
         }
     }
 
-    impl<Y> Unpin for MiniIter<'_, Y> {}
+    impl<Y, Fut: Future<Output = ()>> Unpin for MiniIter<Y, Fut> {}
 
     #[repr(transparent)]
-    struct MiniIterFuture<'r, 'g, Y> {
-        generator: &'r mut MiniIter<'g, Y>,
+    pub struct MiniIterFuture<'r, Y, Fut: Future<Output = ()>> {
+        generator: &'r mut MiniIter<Y, Fut>,
     }
 
-    impl<Y: Send> MiniIter<'_, Y> {
-        pub fn resume_async(&mut self) -> impl Future<Output = Option<Y>> {
+    impl<Y, Fut: Future<Output = ()>> MiniIter<Y, Fut> {
+        pub fn resume_async(&mut self) -> MiniIterFuture<'_, Y, Fut> {
             MiniIterFuture {
                 generator: &mut *self,
             }
         }
     }
 
-    impl<Y> Future for MiniIterFuture<'_, '_, Y> {
+    impl<Y, Fut: Future<Output = ()>> Future for MiniIterFuture<'_, Y, Fut> {
         type Output = Option<Y>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -228,7 +250,7 @@ mod generator {
     }
 
     #[cfg(feature = "stream")]
-    impl<Y: Send> futures_core::Stream for MiniIter<'_, Y> {
+    impl<Y, Fut: Future<Output = ()>> futures_core::Stream for MiniIter<Y, Fut> {
         type Item = Y;
 
         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -246,13 +268,70 @@ mod generator {
     }
 }
 
+pub mod traits {
+    use crate::{GeneratorStatus, MiniGen, MiniIter};
+
+    #[cfg(feature = "send")]
+    pub trait MaybeSend: Send {}
+    #[cfg(feature = "send")]
+    impl<T: Send> MaybeSend for T {}
+    #[cfg(not(feature = "send"))]
+    pub trait MaybeSend {}
+    #[cfg(not(feature = "send"))]
+    impl<T> MaybeSend for T {}
+    pub trait MiniGenerator: MaybeSend {
+        type Yield;
+        type Return;
+        fn resume(&mut self) -> GeneratorStatus<Self::Yield, Self::Return>;
+        fn resume_async(
+            &mut self,
+        ) -> impl Future<Output = GeneratorStatus<Self::Yield, Self::Return>> + MaybeSend;
+    }
+    pub trait MiniIterator: MaybeSend {
+        type Item;
+        fn resume(&mut self) -> Option<Self::Item>;
+        fn resume_async(&mut self) -> impl Future<Output = Option<Self::Item>> + MaybeSend;
+    }
+
+    impl<Y, R, Fut: Future<Output = R>> MiniGenerator for MiniGen<Y, R, Fut> {
+        type Yield = Y;
+
+        type Return = R;
+
+        fn resume(&mut self) -> GeneratorStatus<Self::Yield, Self::Return> {
+            self.resume()
+        }
+
+        fn resume_async(
+            &mut self,
+        ) -> impl Future<Output = GeneratorStatus<Self::Yield, Self::Return>> + MaybeSend {
+            self.resume_async()
+        }
+    }
+
+    impl<Y, Fut: Future<Output = ()>> MiniIterator for MiniIter<Y, Fut> {
+        type Item = Y;
+
+        fn resume(&mut self) -> Option<Self::Item> {
+            self.next()
+        }
+
+        fn resume_async(&mut self) -> impl Future<Output = Option<Self::Item>> + MaybeSend {
+            self.resume_async()
+        }
+    }
+}
+
 pub use generator::*;
 pub use yielder::*;
 
-pub fn generator<'a, Y: Send, R, Fut: Future<Output = R> + 'a, F: FnOnce(Yielder<Y>) -> Fut>(
+pub fn generator<Y, R, Fut: Future<Output = R>, F: FnOnce(Yielder<Y>) -> Fut>(
     func: F,
-) -> MiniGen<'a, Y, R> {
-    let inner = Rc::new(Cell::new(None));
+) -> MiniGen<Y, R, Fut> {
+    #[cfg(not(feature = "send"))]
+    let inner = std::rc::Rc::new(std::cell::Cell::new(None));
+    #[cfg(feature = "send")]
+    let inner = std::sync::Arc::new(std::sync::Mutex::new(None));
     let (sender, receiver) = (Sender(inner.clone()), Receiver(inner));
     let stream = Yielder { sender };
 
@@ -263,8 +342,9 @@ pub fn generator<'a, Y: Send, R, Fut: Future<Output = R> + 'a, F: FnOnce(Yielder
         finished: false,
     }
 }
-pub fn iterator<'a, Y: Send, Fut: Future<Output = ()> + 'a, F: FnOnce(Yielder<Y>) -> Fut>(
+
+pub fn iterator<Y, Fut: Future<Output = ()>, F: FnOnce(Yielder<Y>) -> Fut>(
     func: F,
-) -> MiniIter<'a, Y> {
+) -> MiniIter<Y, Fut> {
     MiniIter(generator(func))
 }
