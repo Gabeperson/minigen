@@ -67,6 +67,7 @@ mod yielder {
         }
     }
 
+    #[must_use = "YieldFuture must be awaited to yield a value!"]
     pub struct YieldFuture<'a, Y> {
         sender: &'a mut Sender<Y>,
         value: Option<Y>,
@@ -161,6 +162,7 @@ mod generator {
             }
         }
 
+        #[must_use = "Must be awaited to produce a value!"]
         pub struct MiniGenFuture<'r, Y, R, Fut: Future<Output = R>> {
             generator: &'r mut MiniGen<Y, R, Fut>,
         }
@@ -210,6 +212,7 @@ mod generator {
 
     impl<Y, Fut: Future<Output = ()>> Unpin for MiniIter<Y, Fut> {}
 
+    #[must_use = "Must be awaited to produce a value!"]
     #[repr(transparent)]
     pub struct MiniIterFuture<'r, Y, Fut: Future<Output = ()>> {
         generator: &'r mut MiniIter<Y, Fut>,
