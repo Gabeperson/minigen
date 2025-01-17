@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 use std::future::Future;
 
+pub mod prelude {
+    pub use super::{MiniGen, MiniIter, Yielder, generator, iterator};
+}
+
 mod yielder {
     use std::task::Poll;
 
